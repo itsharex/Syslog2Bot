@@ -178,6 +178,91 @@ sqlite3 ~/.syslog-alert/syslog.db "SELECT id, device_name, filter_status, alert_
                          └── output_template_id: 输出模板
 ```
 
+### 数据库并发处理
+
+系统采用多层并发控制机制，确保高并发场景下的数据一致性和系统稳定性。
+
+#### 1. 数据库连接管理
+
+```go
+var (
+    db   *gorm.DB
+    once sync.Once
+)
+
+func GetDB() *gorm.DB {
+    once.Do(func() {
+        db, err = gorm.Open(sqlite.Open(dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_sync=NORMAL"), &gorm.Config{
+            Logger: logger.Default.LogMode(logger.Silent),
+        })
+        sqlDB, _ := db.DB()
+        sqlDB.SetMaxOpenConns(1)
+        sqlDB.SetMaxIdleConns(1)
+    })
+    return db
+}
+```
+
+**关键配置**：
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `_journal_mode` | WAL | Write-Ahead Logging，支持并发读写 |
+| `_busy_timeout` | 5000ms | 数据库锁定时的等待超时 |
+| `_sync` | NORMAL | 平衡性能和数据安全 |
+| `SetMaxOpenConns` | 1 | SQLite 单连接，避免"database is locked" |
+| `SetMaxIdleConns` | 1 | 保持连接池稳定 |
+
+#### 2. 服务层并发控制
+
+SyslogService 使用两个互斥锁保护不同资源：
+
+```go
+type SyslogService struct {
+    mu      sync.RWMutex    // 保护服务状态（running, port等）
+    alertMu sync.RWMutex    // 保护告警缓存（alertCache）
+    logChan chan SyslogMessage  // 日志消息通道，缓冲1000条
+}
+```
+
+**使用场景**：
+- `mu` 锁：服务启动/停止、获取服务状态
+- `alertMu` 锁：告警去重缓存读写
+
+#### 3. 日志处理流程
+
+```
+UDP/TCP接收 → logChan通道(缓冲1000) → 处理协程 → 数据库写入
+     ↑                                          ↓
+   异步接收                                   串行处理
+```
+
+**设计优势**：
+- **异步解耦**：接收与处理分离，网络IO不阻塞
+- **通道缓冲**：1000条消息缓冲，应对突发流量
+- **串行写入**：避免SQLite并发写入冲突
+
+#### 4. 统计数据并发安全
+
+```go
+type App struct {
+    stats      SystemStats
+    statsMutex sync.RWMutex
+}
+
+func (a *App) GetStats() SystemStats {
+    a.statsMutex.RLock()
+    defer a.statsMutex.RUnlock()
+    return a.stats
+}
+```
+
+#### 5. 并发最佳实践
+
+1. **读多写少场景**：使用 `sync.RWMutex`，允许多个读操作并行
+2. **临界区最小化**：只在必要时持有锁，减少阻塞时间
+3. **通道优先**：协程间通信优先使用 channel，而非共享内存
+4. **单例数据库**：`sync.Once` 确保数据库连接只初始化一次
+
 ---
 
 ## 功能模块
