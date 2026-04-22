@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	stdlog "log"
 )
 
 type FilterCondition struct {
@@ -30,27 +32,27 @@ func NewFilterEngine(policy *FilterPolicy) (*FilterEngine, error) {
 	engine := &FilterEngine{
 		policy: policy,
 	}
-	
+
 	if policy.ParseTemplateID > 0 {
 		template, err := GetParseTemplateByID(policy.ParseTemplateID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get parse template: %v", err)
 		}
-		
+
 		parser, err := NewLogParser(template)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create parser: %v", err)
 		}
 		engine.parser = parser
 	}
-	
+
 	return engine, nil
 }
 
 func (e *FilterEngine) Match(log *SyslogLog) (bool, map[string]interface{}, error) {
 	var parsedData map[string]interface{}
 	var err error
-	
+
 	if e.parser != nil {
 		parsedData, err = e.parser.Parse(log.RawMessage)
 		if err != nil {
@@ -65,7 +67,7 @@ func (e *FilterEngine) Match(log *SyslogLog) (bool, map[string]interface{}, erro
 			parsedData = make(map[string]interface{})
 		}
 	}
-	
+
 	// 先检查白名单
 	if e.policy.Whitelist != "" && e.policy.WhitelistField != "" {
 		matched, err := e.matchWhitelist(parsedData)
@@ -77,46 +79,67 @@ func (e *FilterEngine) Match(log *SyslogLog) (bool, map[string]interface{}, erro
 			return false, parsedData, nil
 		}
 	}
-	
+
 	if e.policy.Conditions == "" {
 		return true, parsedData, nil
 	}
-	
+
 	var conditions []FilterCondition
 	if err := json.Unmarshal([]byte(e.policy.Conditions), &conditions); err != nil {
 		return false, nil, fmt.Errorf("invalid conditions: %v", err)
 	}
-	
+
 	matched := e.evaluateConditions(conditions, parsedData, e.policy.ConditionLogic)
-	
+
 	return matched, parsedData, nil
 }
 
 func (e *FilterEngine) matchWhitelist(data map[string]interface{}) (bool, error) {
+	stdlog.Printf("[DEBUG] matchWhitelist called - WhitelistField: %s, Whitelist: %s", e.policy.WhitelistField, e.policy.Whitelist)
+	stdlog.Printf("[DEBUG] parsedData keys: %v", getMapKeys(data))
+
 	var whitelist []WhitelistItem
 	if err := json.Unmarshal([]byte(e.policy.Whitelist), &whitelist); err != nil {
+		stdlog.Printf("[DEBUG] Failed to parse whitelist: %v", err)
 		return false, fmt.Errorf("invalid whitelist: %v", err)
 	}
-	
+
+	stdlog.Printf("[DEBUG] Parsed whitelist items: %+v", whitelist)
+
 	// 获取字段值
 	value, exists := data[e.policy.WhitelistField]
 	if !exists {
+		stdlog.Printf("[DEBUG] Field %s not found in parsedData", e.policy.WhitelistField)
 		return false, nil
 	}
-	
+
 	ipStr := fmt.Sprintf("%v", value)
-	
+	stdlog.Printf("[DEBUG] Field %s value: %s", e.policy.WhitelistField, ipStr)
+
 	for _, item := range whitelist {
 		if !item.Enabled {
+			stdlog.Printf("[DEBUG] Whitelist item %s is disabled, skipping", item.CIDR)
 			continue
 		}
-		
-		if e.matchCIDR(ipStr, item.CIDR) {
+
+		matched := e.matchCIDR(ipStr, item.CIDR)
+		stdlog.Printf("[DEBUG] CIDR match: IP=%s, CIDR=%s, Matched=%v", ipStr, item.CIDR, matched)
+		if matched {
+			stdlog.Printf("[DEBUG] Whitelist matched! IP %s matches CIDR %s", ipStr, item.CIDR)
 			return true, nil
 		}
 	}
-	
+
+	stdlog.Printf("[DEBUG] No whitelist match found for IP %s", ipStr)
 	return false, nil
+}
+
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (e *FilterEngine) matchCIDR(ipStr, cidr string) bool {
@@ -124,19 +147,19 @@ func (e *FilterEngine) matchCIDR(ipStr, cidr string) bool {
 	if !strings.Contains(cidr, "/") {
 		return ipStr == cidr
 	}
-	
+
 	// 解析CIDR
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return false
 	}
-	
+
 	// 解析IP
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
-	
+
 	return ipNet.Contains(ip)
 }
 
@@ -144,12 +167,12 @@ func (e *FilterEngine) evaluateConditions(conditions []FilterCondition, data map
 	if len(conditions) == 0 {
 		return true
 	}
-	
+
 	results := make([]bool, len(conditions))
 	for i, cond := range conditions {
 		results[i] = e.evaluateCondition(cond, data)
 	}
-	
+
 	if logic == "OR" {
 		for _, r := range results {
 			if r {
@@ -158,7 +181,7 @@ func (e *FilterEngine) evaluateConditions(conditions []FilterCondition, data map
 		}
 		return false
 	}
-	
+
 	for _, r := range results {
 		if !r {
 			return false
@@ -172,9 +195,9 @@ func (e *FilterEngine) evaluateCondition(cond FilterCondition, data map[string]i
 	if !exists {
 		return cond.Operator == "not_exists"
 	}
-	
+
 	strValue := fmt.Sprintf("%v", value)
-	
+
 	switch cond.Operator {
 	case "equals", "==":
 		return strValue == cond.Value
@@ -231,11 +254,11 @@ func compareNumbers(a, b string) int {
 	var aNum, bNum float64
 	_, err1 := fmt.Sscanf(a, "%f", &aNum)
 	_, err2 := fmt.Sscanf(b, "%f", &bNum)
-	
+
 	if err1 != nil || err2 != nil {
 		return strings.Compare(a, b)
 	}
-	
+
 	if aNum > bNum {
 		return 1
 	} else if aNum < bNum {
@@ -246,33 +269,33 @@ func compareNumbers(a, b string) int {
 
 func ProcessLogWithPolicies(log *SyslogLog, device *Device) (*FilterPolicy, map[string]interface{}, error) {
 	var policies []FilterPolicy
-	
+
 	if device != nil && device.ID > 0 {
 		policies = GetFilterPoliciesByDeviceID(device.ID)
 		if len(policies) == 0 && device.GroupID > 0 {
 			policies = GetFilterPoliciesByDeviceGroupID(device.GroupID)
 		}
 	}
-	
+
 	if len(policies) == 0 {
 		policies = GetFilterPolicies()
 	}
-	
+
 	for _, policy := range policies {
 		if !policy.IsActive {
 			continue
 		}
-		
+
 		engine, err := NewFilterEngine(&policy)
 		if err != nil {
 			continue
 		}
-		
+
 		matched, parsedData, err := engine.Match(log)
 		if err != nil {
 			continue
 		}
-		
+
 		if matched {
 			if policy.Action == "keep" {
 				return &policy, parsedData, nil
@@ -281,29 +304,29 @@ func ProcessLogWithPolicies(log *SyslogLog, device *Device) (*FilterPolicy, map[
 			}
 		}
 	}
-	
+
 	return nil, nil, nil
 }
 
 func ExtractKeyFields(data map[string]interface{}) string {
 	keyFields := make(map[string]interface{})
-	
+
 	fieldNames := []string{
 		"attackIp", "victimIp", "threatType", "attack_result", "result",
 		"levelDesc", "description", "dealStatus", "threatSource",
 		"timestamp", "localTimestamp", "machineName",
 	}
-	
+
 	for _, name := range fieldNames {
 		if value, exists := data[name]; exists {
 			keyFields[name] = value
 		}
 	}
-	
+
 	if len(keyFields) == 0 {
 		return ""
 	}
-	
+
 	jsonBytes, _ := json.Marshal(keyFields)
 	return string(jsonBytes)
 }
@@ -317,7 +340,7 @@ func FormatAlertTime(data map[string]interface{}) string {
 			return time.Unix(int64(milli), 0).Format("2006-01-02 15:04:05")
 		}
 	}
-	
+
 	if ts, ok := data["timestamp"]; ok {
 		switch v := ts.(type) {
 		case time.Time:
@@ -326,6 +349,6 @@ func FormatAlertTime(data map[string]interface{}) string {
 			return v
 		}
 	}
-	
+
 	return time.Now().Format("2006-01-02 15:04:05")
 }

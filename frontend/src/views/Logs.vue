@@ -163,7 +163,10 @@ function getFilterStatusType(status: string): string {
   const statusMap: Record<string, string> = {
     'pending': 'warning',
     'matched': 'success',
-    'unmatched': 'info'
+    'unmatched': 'info',
+    'whitelisted': 'warning',
+    'discarded': 'danger',
+    'disabled': 'info'
   }
   return statusMap[status] || 'info'
 }
@@ -172,7 +175,10 @@ function getFilterStatusText(status: string): string {
   const statusMap: Record<string, string> = {
     'pending': '待处理',
     'matched': '已匹配',
-    'unmatched': '未匹配'
+    'unmatched': '未匹配',
+    'whitelisted': '白名单',
+    'discarded': '已丢弃',
+    'disabled': '已禁用'
   }
   return statusMap[status] || status
 }
@@ -207,9 +213,9 @@ function getFilterStatusText(status: string): string {
     </el-card>
 
     <el-card shadow="hover" class="table-card">
-      <el-table :data="logs" v-loading="loading" stripe highlight-current-row @row-dblclick="viewLogDetail">
-        <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column prop="deviceName" label="设备名称" width="120" />
+      <el-table :data="logs" v-loading="loading" stripe highlight-current-row @row-dblclick="viewLogDetail" border>
+        <el-table-column prop="id" label="ID" width="80" show-overflow-tooltip />
+        <el-table-column prop="deviceName" label="设备名称" width="100" show-overflow-tooltip />
         <el-table-column prop="sourceIp" label="来源IP" width="130" />
         <el-table-column label="威胁等级" width="90">
           <template #default="{ row }">
@@ -293,12 +299,14 @@ function getFilterStatusText(status: string): string {
   .table-card {
     .log-text {
       display: block;
-      white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      white-space: nowrap;
       max-width: 100%;
+      line-height: 1.4;
+      max-height: 2.8em;
     }
-    
+
     .pagination {
       margin-top: 15px;
       display: flex;

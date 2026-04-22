@@ -331,6 +331,7 @@ func (s *SyslogService) processLogWithPolicies(syslogLog *SyslogLog, device *Dev
 	var parsedData map[string]interface{}
 	var hasActivePolicy bool
 	var hasAnyPolicy bool
+	var whitelistedByPolicy string
 
 	for i := range policies {
 		hasAnyPolicy = true
@@ -387,6 +388,20 @@ func (s *SyslogService) processLogWithPolicies(syslogLog *SyslogLog, device *Dev
 		}
 
 		stdlog.Printf("[DEBUG] Checking conditions: %s", policy.Conditions)
+
+		// 先检查白名单
+		if policy.Whitelist != "" && policy.WhitelistField != "" {
+			whitelisted, whitelistErr := s.matchWhitelist(data, policy)
+			if whitelistErr != nil {
+				stdlog.Printf("[DEBUG] Whitelist check error: %v", whitelistErr)
+			}
+			if whitelisted {
+				stdlog.Printf("[DEBUG] Log matched whitelist, skipping")
+				whitelistedByPolicy = policy.Name
+				continue // 白名单匹配，跳过此策略，继续检查下一个策略
+			}
+		}
+
 		if s.matchConditions(data, policy) {
 			matchedPolicy = policy
 			parsedData = data
@@ -424,6 +439,26 @@ func (s *SyslogService) processLogWithPolicies(syslogLog *SyslogLog, device *Dev
 	} else {
 		syslogLog.FilterStatus = "unmatched"
 		UpdateLogFilterStatus(syslogLog.ID, "unmatched", 0)
+
+		// 如果有策略匹配了白名单但没有匹配筛选条件
+		if whitelistedByPolicy != "" {
+			stdlog.Printf("[DEBUG] Log matched whitelist by policy %s but no filter conditions matched", whitelistedByPolicy)
+			s.updateTraceFilter(syslogLog.ID, "whitelisted", true, whitelistedByPolicy, "", "whitelist")
+			UpdateLogFilterStatus(syslogLog.ID, "whitelisted", 0)
+			return
+		}
+
+		// 检查是否需要丢弃未匹配日志
+		if hasActivePolicy && matchedPolicy == nil {
+			for _, p := range GetFilterPolicies() {
+				if p.IsActive && p.DropUnmatched {
+					stdlog.Printf("[DEBUG] Dropping unmatched log by policy: %s", p.Name)
+					s.updateTraceFilter(syslogLog.ID, "dropped", true, "", "", "drop_unmatched")
+					DeleteLog(syslogLog.ID)
+					return
+				}
+			}
+		}
 
 		if !hasAnyPolicy || !hasActivePolicy {
 			stdlog.Printf("[DEBUG] No active policy found")
@@ -463,6 +498,50 @@ func (s *SyslogService) parseSyslogToMap(msg string) map[string]interface{} {
 	}
 
 	return result
+}
+
+func (s *SyslogService) matchWhitelist(data map[string]interface{}, policy *FilterPolicy) (bool, error) {
+	var whitelist []WhitelistItem
+	if err := json.Unmarshal([]byte(policy.Whitelist), &whitelist); err != nil {
+		return false, fmt.Errorf("invalid whitelist: %v", err)
+	}
+
+	value, exists := data[policy.WhitelistField]
+	if !exists {
+		return false, nil
+	}
+
+	ipStr := fmt.Sprintf("%v", value)
+
+	for _, item := range whitelist {
+		if !item.Enabled {
+			continue
+		}
+
+		if s.matchCIDR(ipStr, item.CIDR) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (s *SyslogService) matchCIDR(ipStr, cidr string) bool {
+	if !strings.Contains(cidr, "/") {
+		return ipStr == cidr
+	}
+
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	return ipNet.Contains(ip)
 }
 
 func (s *SyslogService) matchConditions(data map[string]interface{}, policy *FilterPolicy) bool {

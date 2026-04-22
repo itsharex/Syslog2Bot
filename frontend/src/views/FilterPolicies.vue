@@ -329,7 +329,9 @@ function handleEdit(row: FilterPolicy) {
   } else {
     whitelist.value = []
   }
-  
+
+  formData.value.whitelistField = row.whitelistField || ''
+
   dialogVisible.value = true
 }
 
@@ -359,6 +361,11 @@ function addCondition() {
 
 function removeCondition(index: number) {
   conditions.value.splice(index, 1)
+}
+
+function getWhitelistFieldLabel(): string {
+  const field = availableFields.value.find(f => f.value === formData.value.whitelistField)
+  return field ? field.label : formData.value.whitelistField || '未选择'
 }
 
 function addWhitelistItem() {
@@ -613,7 +620,12 @@ function getActionText(action: string): string {
             </div>
             
             <div v-if="whitelist.length > 0" class="whitelist-list">
-              <el-table :data="whitelist" style="width: 100%" size="small">
+              <el-table :data="whitelist" style="width: 100%" size="small" :header-cell-style="{ background: 'var(--bg-primary)', color: 'var(--text-primary)' }">
+                <el-table-column label="匹配字段" width="140">
+                  <template #default>
+                    <el-tag type="info" size="small">{{ getWhitelistFieldLabel() }}</el-tag>
+                  </template>
+                </el-table-column>
                 <el-table-column prop="cidr" label="IP/CIDR" min-width="180">
                   <template #default="{ row }">
                     <span class="whitelist-cidr">{{ row.cidr }}</span>
@@ -836,7 +848,22 @@ function getActionText(action: string): string {
       background: var(--bg-secondary);
       border-radius: 8px;
       padding: 8px;
-      
+
+      .whitelist-field-info {
+        padding: 8px 12px;
+        margin-bottom: 8px;
+        background: var(--bg-primary);
+        border-radius: 4px;
+        border-left: 3px solid var(--accent-color);
+      }
+
+      .field-tag {
+        font-size: 11px;
+        color: var(--accent-color);
+        font-weight: normal;
+        margin-left: 4px;
+      }
+
       .whitelist-cidr {
         color: var(--accent-color);
         font-weight: 500;
